@@ -7,7 +7,7 @@ from PIL import Image
 
 cos = torch.nn.CosineSimilarity(dim=0, eps=1e-6)
 def get_text_embeds_without_uncond(prompt, tokenizer, text_encoder):
-    # Tokenize text and get embeddings
+    # Tokenize text and get embeddings，转化成PyTorch张量，并存储在text_input中
     text_input = tokenizer(
       prompt, padding='max_length', max_length=tokenizer.model_max_length,
       truncation=True, return_tensors='pt')
@@ -28,6 +28,7 @@ def get_char_table():
 def cos_mask(a,b,mask):
     return cos(a*mask, b*mask)
 
+#搜索能够使得余弦相似度最小化的字符而不是句子。返回的修改后文本与原始文本在余弦相似度上差异很大时，这意味着修改后的文本和原始文本在向量空间中的表示相差很大，可能存在明显的改动或者变化，而不是很相似的句子。
 def search_min_char(sentence_embading, sentence, char_list, k, mask=None, tokenizer=None, text_encoder=None):
     modify_sentence = copy.deepcopy(sentence)
     res=''
@@ -44,6 +45,7 @@ def search_min_char(sentence_embading, sentence, char_list, k, mask=None, tokeni
             temp_cos=cos(sentence_embading.view(-1), change_embading.view(-1))
         else:
             temp_cos=cos_mask(sentence_embading.view(-1), change_embading.view(-1), mask)
+        #计算原始文本和修改后文本之间的余弦相似度
         if temp_cos < min_cos:
             res=change_sentence
             min_cos = temp_cos
@@ -51,6 +53,8 @@ def search_min_char(sentence_embading, sentence, char_list, k, mask=None, tokeni
     modify_sentence=res
     # print(min_cos,modify_sentence,"char",min_char)
     return modify_sentence
+
+#迭代搜索最小化损失的函数
 def search_min_sentence_iteration(sentence, char_list, length, iter_times, mask=None, random_choice=False, tokenizer=None, text_encoder=None):
     sentence_embedding = get_text_embeds_without_uncond([sentence], tokenizer, text_encoder)
     if random_choice:
@@ -59,6 +63,8 @@ def search_min_sentence_iteration(sentence, char_list, length, iter_times, mask=
         length -= 1
     else:
         modify_sentence = copy.deepcopy(sentence)+' '
+
+    # 对于5个关键字符开始进行处理
     for i in range(length):
         modify_sentence += ' '
         modify_sentence = search_min_char(sentence_embedding, modify_sentence, char_list, -1, tokenizer=tokenizer, text_encoder=text_encoder)
@@ -73,7 +79,9 @@ def get_generation(string1, string2, char_list, cross_loc = None, variation_loc 
     if len(string1) != len(string2):
         print("length of string1 and string2 should be the same")
         return None
+    #进行交叉操作
     string1, string2 = cross_generation(string1, string2)
+    #进行变异操作
     string1, string2 = vari_generation(string1, string2, char_list)
     return string1, string2
     
@@ -104,6 +112,7 @@ def vari_generation(string1, string2, char_list, vari_loc = None):
     return string1, string2
 
 def genetic(sentence, char_list, length, generation_num = 50, generateion_scale = 20, mask=None, tokenizer=None, text_encoder=None):
+    #初始化一个基于字符列表的初始池子（generation_list），用于存储生成的句子。
     generation_list = init_pool(char_list, length)
     res = []
     score_list={}
@@ -187,7 +196,7 @@ def forward_embedding(hidden_states,input_shape, model=None, tokenizer=None, tex
     )
     bsz, seq_len = input_shape
     return_dict = text_encoder.text_model.config.use_return_dict
-    causal_attention_mask = text_encoder.text_model._build_causal_attention_mask(bsz, seq_len).to(hidden_states.device)
+    causal_attention_mask = text_encoder.text_model._build_causal_attention_mask(bsz, seq_len,hidden_states.dtype).to(hidden_states.device)
     attention_mask = None
     encoder_outputs = text_encoder.text_model.encoder(
         inputs_embeds=hidden_states,
@@ -209,7 +218,7 @@ def forward_embedding_no_grad(hidden_states,input_shape, model=None, tokenizer=N
         )
         bsz, seq_len = input_shape
         return_dict = text_encoder.text_model.config.use_return_dict
-        causal_attention_mask = text_encoder.text_model._build_causal_attention_mask(bsz, seq_len).to(hidden_states.device)
+        causal_attention_mask = text_encoder.text_model._build_causal_attention_mask(bsz, seq_len,hidden_states.dtype).to(hidden_states.device)
         attention_mask = None
         encoder_outputs = text_encoder.text_model.encoder(
             inputs_embeds=hidden_states,
@@ -329,16 +338,17 @@ def train(init_per_sample, sentence, len_prompt, char_list, model, iter_num = 10
     num_word = len(sentence.split(' '))
     seq_len = 77
     neighbor_num = len(char_list)
-    u_tensor = torch.zeros([init_per_sample, seq_len, neighbor_num], dtype = torch.double).fill_(1/neighbor_num)
+    u_tensor = torch.zeros([init_per_sample, seq_len, neighbor_num], dtype = torch.double).fill_(1/neighbor_num)#用于存储初始化的张量值
     fixed_z = torch.zeros(init_per_sample, seq_len)
     fixed_z[0][num_word+1:num_word+len_prompt+1]=1
-    u_tensor.requires_grad = True
-    candidate_embed = craft_candidate_embed(char_list, tokenizer=tokenizer, text_encoder=text_encoder)
-    orig_embeddings,input_shape = get_clip_embedding(sentence, tokenizer=tokenizer, text_encoder=text_encoder)
+    u_tensor.requires_grad = True #标记其需要梯度计算
+    candidate_embed = craft_candidate_embed(char_list, tokenizer=tokenizer, text_encoder=text_encoder)#是根据字符列表生成候选词嵌入的函数生成的张量。
+    orig_embeddings,input_shape = get_clip_embedding(sentence, tokenizer=tokenizer, text_encoder=text_encoder)#是根据句子生成原始嵌入和输入形状的函数返回的值。
     orig_output = get_text_embeds_without_uncond(sentence, tokenizer=tokenizer, text_encoder=text_encoder)
-    model.train()
+    model.train() #将模型设置为训练模式。
     loss_list=[]
     single_loss_list=[]
+    # batch_size = 100
     batch_size = 100
     sign=True
     simplex=False
@@ -434,14 +444,31 @@ def object_key(sentence_list, object_word, thres = 10, tokenizer=None, text_enco
     average_diff = total_diff/len(diff_list)
 
     total_sign=0
+    #vec为差值向量，是numpy数组或PyTorch张量（tensor）类型
+    # 差值向量中的元素大于0：表示在经过“crafted_embed - sen_embed”计算后，对应位置的值为正数。
+    # 这意味着，在句子中删除目标词后的嵌入向量（crafted_embed）与原始句子的嵌入向量（sen_embed）相比，
+    # 这个位置的特征值增加了。这可能表明在基于目标词进行分析时，该特征在删除目标词后受到了影响或突出。
+
+    # 差值向量中的元素小于0：表示在经过“crafted_embed - sen_embed”计算后，对应位置的值为负数。
+    # 这意味着在删除目标词后的嵌入向量与原始句子的嵌入向量相比，这个位置的特征值减少了。
+    # 这可能表明在基于目标词进行分析时，目标词对应的特征在原始句子中是一个显著部分，删除后导致特征值减少。
     for vec in diff_list:
         vec[vec>0]=1
         vec[vec<0]=-1
         total_sign+=vec
     total_sign[abs(total_sign)<=thres]=0
     total_sign[abs(total_sign)>thres]=1
+    # total_sign[total_sign > 0].shape[0]：这部分代码首先选取向量total_sign中大于0的元素，并使用.shape[0]来获取这些元素的数量。
+    # 换句话说，统计向量total_sign中大于0的元素的个数。
+    #
+    # total_sign.view(-1).shape[0]：这部分代码首先使用.view(-1)将向量total_sign展平为一维，然后使用.shape[0]来获取展平后向量的总元素个数。
+    #
+    # 总结：这行代码的作用是计算向量total_sign中大于0的元素占总元素个数的比例。具体计算方式是将大于0的元素数量除以向量的总元素数量。
+    # 通过计算大于0元素所占比例，可以了解处理后的向量中哪些特征在删除目标词后增加了，有助于进一步分析词汇的特征影响
     print('Ratio of mask', total_sign[total_sign>0].shape[0]/total_sign.view(-1).shape[0])
     return total_sign
+
+
 
 
 def image_grid(imgs, rows, cols):
@@ -450,7 +477,7 @@ def image_grid(imgs, rows, cols):
     w, h = imgs[0].size
     grid = Image.new('RGB', size=(cols*w, rows*h))
     grid_w, grid_h = grid.size
-    
+
     for i, img in enumerate(imgs):
         grid.paste(img, box=(i%cols*w, i//cols*h))
     return grid
